@@ -6,3 +6,5 @@ __pycache__/
 *.safetensors
 data/
 wandb/
+runs/
+artifacts/

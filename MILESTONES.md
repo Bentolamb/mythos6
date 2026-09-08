@@ -93,4 +93,54 @@ tokens/sec (generation), prompt tokens/sec (prefill), memory usage, KV-cache siz
 ---
 
 ## Results log
-*(Empty until M0 runs. Populated as milestones close — do not backfill estimates as if measured.)*
+
+### M0 — 2026-09-08
+- Smoke test (`scripts/smoke_test.py`) passes on the local GTX 1050 Ti: loss 6.95 → 2.27 over 30
+  steps on `mythos6-nano`. Closed-form param-count formula in `config.py` matches the actual
+  instantiated model exactly (158,080 params) after including QK-norm/final-norm terms.
+- `mythos6-130m-dense` = 113,266,944 params; `mythos6-320m-dense` = 320,917,504 params — both
+  match the ARCHITECTURE.md sec 3 table.
+- `train.py` loop mechanics validated on `mythos6-nano` with synthetic data: checkpoint save +
+  resume confirmed correct (resumed cleanly from step 20, continued to step 30).
+
+### M1 — 2026-09-08 (in progress)
+- All four mixture sources (`fineweb-edu`, `cosmopedia-100k`, `open-web-math`,
+  `the-stack-smol-xl`) confirmed reachable, ungated, Parquet-backed (no deprecated dataset-script
+  loaders — this ruled out `codeparrot/github-code` and a couple of gated `bigcode`/`nampdn-ai`
+  code datasets during source selection).
+- Observed mixture sampling proportions over 200 draws: general 51.5% / synthetic-textbook 18% /
+  code 15.5% / math 15% vs. target weights 55/15/15/15 — within expected sampling noise.
+- Tokenizer trained successfully at small scale (3,000 docs, full 49,152 vocab, round-trip check
+  passes). **Bug found and fixed:** feeding `tokenizers`' Rust-threaded `train_from_iterator` a
+  live generator that was still doing HF Hub network I/O (pyarrow parsing, retried sockets)
+  caused an intermittent segfault on this machine. Fixed by materializing the doc sample into a
+  plain list before training (`scripts/train_tokenizer.py`) — sidesteps the Python/Rust threading
+  boundary during network I/O. Not yet confirmed whether this was Windows-socket-specific or would
+  also occur on Kaggle/Colab's Linux runners; the list-materialization approach is robust either
+  way, so it's the shipped approach rather than something to re-litigate per-platform.
+- Contamination scanner validated at small scale (1,500 corpus docs vs. GSM8K/HellaSwag/
+  ARC-Challenge 13-gram sets): 0% overlap found, scanner logic confirmed working (loads benchmark
+  sets, builds n-gram index, flags correctly).
+- Dedup scanner validated at small scale (1,500 docs): 0% exact dupes, 0.4% near-dupes caught at
+  Jaccard ≥ 0.8 — plausible for this mixture, confirms MinHash-LSH pipeline works end-to-end.
+- **Data pipeline throughput measured, and it's a real bottleneck as currently built:** live
+  streaming + tokenize-per-step on this machine (old 4-core CPU, single-threaded, cold cache)
+  sustains only **~1,228 tokens/sec**. A single T4 at the ~15 TFLOP/s effective estimate from
+  ARCHITECTURE.md sec 6.3 needs roughly **~7,800 tokens/sec** to stay compute-bound at the
+  320m-dense config (6×N_active FLOPs/token ÷ throughput). Live tokenization would starve the GPU
+  by ~6x. **Action before M2:** pre-tokenize the corpus once into packed fixed-length binary
+  shards (memory-mapped `uint16`/`uint32` arrays) rather than tokenizing on the fly during
+  training — standard practice, removes the per-step tokenization/network cost from the training
+  loop entirely. Not yet implemented; tracked as the next concrete task.
+- **Fix implemented and verified:** `scripts/pretokenize.py` writes the packed mixture to
+  memory-mapped uint16 shards (`manifest.json` + `shard_XXXXX.bin`); `mythos.data.PackedShardDataset`
+  reads them at training time. End-to-end integration test (pretokenize → PackedShardDataset →
+  a real training step via `train.py`'s `packed_batch_iter`) passes, loss decreasing correctly.
+  Measured throughput of the shard reader alone: **~103,664 tokens/sec** on this same CPU — an
+  ~84x improvement over the 1,228 tok/s live-streaming path, comfortably above the ~7,800 tok/s a
+  T4 needs to stay compute-bound. `train.py --data-dir <shards>` now uses this path; the old
+  live-tokenize-per-step path was removed rather than kept as a slower fallback.
+- **M1 exit criterion met** at small scale (all checks above pass). Remaining before a real M2
+  run: rerun `train_tokenizer.py` and `pretokenize.py` at full scale (hundreds of thousands of
+  docs / the full ~1-5B token budget from ARCHITECTURE.md sec 6.3) rather than the few-thousand-doc
+  samples used here to validate correctness — that's a long-running CPU job, not a new milestone.
