@@ -8,3 +8,5 @@ data/
 wandb/
 runs/
 artifacts/
+*.egg-info/
+build/

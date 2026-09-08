@@ -8,8 +8,14 @@ honest scope (this targets Kaggle/Colab-tier compute, not frontier scale) before
 
 ```
 pip install -r requirements.txt
+pip install -e .
 python scripts/smoke_test.py
 ```
+
+`pip install -e .` matters if you'll run `python -m mythos.train` directly (rather than only the
+scripts under `scripts/`) — module resolution for `-m` needs `mythos` importable before any of
+train.py's own code runs, which a bare `PYTHONPATH` trick or running from the wrong directory
+won't reliably give you.
 
 ## Real training runs
 
